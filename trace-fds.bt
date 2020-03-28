@@ -1,0 +1,191 @@
+include "linux/in.h"
+include "linux/in6.h"
+
+// 0: use fd_name
+// 1: use fd_name/fd
+// 2: use fd_address and fd_port
+
+#define MAIN_FILTER (pid == cpid || (comm != "bpftrace" && cgroup == @target_cgroup))
+
+#define PRINT_EVENT(fd, action) \
+  printf("%ld|%s (%d)|%s|/r", nsecs / 1000000000, comm, pid, action); \
+  if (@fd_type[fd] == 2) { \
+    printf("%s:%d", @fd_address[fd], @fd_port[fd]); \
+  } else { \
+    printf("%s", @fd_name[fd]); \
+    if (@fd_type[fd] == 1) { \
+      printf("/%d", fd); \
+    } \
+  } \
+  printf("\n")
+
+#define CREATE_FD(fd) PRINT_EVENT(fd, "A")
+
+#define DELETE_FD(fd) PRINT_EVENT(fd, "D"); \
+  delete(@fd_name[fd]); \
+  delete(@fd_type[fd]); \
+  delete(@fd_address[fd]); \
+  delete(@fd_port[fd])
+
+#define CHANGE_FD(fd) PRINT_EVENT(fd, "M")
+
+BEGIN { @target_cgroup = cgroup; }
+
+tracepoint:syscalls:sys_enter_openat,
+tracepoint:syscalls:sys_enter_open
+/MAIN_FILTER/
+{
+  @last_openat[tid] = str(args->filename);
+}
+
+tracepoint:syscalls:sys_exit_openat,
+tracepoint:syscalls:sys_exit_open
+/MAIN_FILTER && args->ret >= 0/
+{
+  @fd_type[args->ret] = 0;
+  @fd_name[args->ret] = @last_openat[tid];
+  CREATE_FD(args->ret);
+  delete(@last_openat[tid]);
+}
+
+tracepoint:syscalls:sys_enter_close
+/MAIN_FILTER/
+{
+  DELETE_FD(args->fd);
+}
+
+tracepoint:syscalls:sys_enter_write
+/MAIN_FILTER/
+{
+  @last_fd[tid] = args->fd;
+  @last_write_bytes[tid] = args->count;
+}
+
+tracepoint:syscalls:sys_enter_sendto
+/MAIN_FILTER/
+{
+  @last_fd[tid] = args->fd;
+  @last_write_bytes[tid] = args->len;
+}
+
+tracepoint:syscalls:sys_exit_write,
+tracepoint:syscalls:sys_exit_sendto /MAIN_FILTER && args->ret > 0/ {
+  CHANGE_FD(@last_fd[tid]);
+  delete(@last_fd[tid]);
+  delete(@last_write_bytes[tid]);
+}
+
+tracepoint:syscalls:sys_enter_read
+/MAIN_FILTER/
+{
+  @last_fd[tid] = args->fd;
+  @last_read_bytes[tid] = args->count;
+}
+
+tracepoint:syscalls:sys_enter_recvfrom
+/MAIN_FILTER/
+{
+  @last_fd[tid] = args->fd;
+  @last_read_bytes[tid] = args->size;
+}
+
+tracepoint:syscalls:sys_exit_read,
+tracepoint:syscalls:sys_exit_recvfrom
+/MAIN_FILTER/
+{
+  CHANGE_FD(@last_fd[tid]);
+  delete(@last_fd[tid]);
+  delete(@last_read_bytes[tid]);
+}
+
+tracepoint:syscalls:sys_exit_socket
+/MAIN_FILTER/
+{
+  @fd_type[args->ret] = 1;
+  @fd_name[args->ret] = "socket";
+  CREATE_FD(args->ret);
+}
+
+tracepoint:syscalls:sys_enter_connect
+/
+  MAIN_FILTER
+  && (args->uservaddr->sa_family == AF_INET
+      || args->uservaddr->sa_family == AF_INET6)
+/
+{
+  @sockaddr[tid] = args->uservaddr;
+  @last_fd[tid] = args->fd;
+}
+
+tracepoint:syscalls:sys_exit_connect
+/MAIN_FILTER && args->ret == 0/
+{
+  @fd_type[@last_fd[tid]] = 2;
+
+  if (@sockaddr[tid]->sa_family == AF_INET) {
+    $s = (struct sockaddr_in *)@sockaddr[tid];
+    @fd_address[@last_fd[tid]] = ntop(AF_INET, $s->sin_addr.s_addr);
+    @fd_port[@last_fd[tid]] = ($s->sin_port >> 8) | (($s->sin_port << 8) & 0xff00);
+  } else {
+    $s6 = (struct sockaddr_in6 *)@sockaddr[tid];
+    @fd_address[@last_fd[tid]] = ntop(AF_INET6, $s6->sin6_addr.in6_u.u6_addr8);
+    @fd_port[@last_fd[tid]] = ($s6->sin6_port >> 8) | (($s6->sin6_port << 8) & 0xff00);
+  }
+
+  CHANGE_FD(@last_fd[tid]);
+
+  delete(@sockaddr[tid]);
+  delete(@last_fd[tid]);
+}
+
+tracepoint:syscalls:sys_enter_bind
+/
+  MAIN_FILTER
+  && (args->umyaddr->sa_family == AF_INET
+      || args->umyaddr->sa_family == AF_INET6)
+/
+{
+  @sockaddr[tid] = args->umyaddr;
+  @last_fd[tid] = args->fd;
+}
+
+tracepoint:syscalls:sys_exit_bind
+/MAIN_FILTER && args->ret == 0/
+{
+  if (@sockaddr[tid]->sa_family == AF_INET) {
+    $s = (struct sockaddr_in *)@sockaddr[tid];
+    @fd_address[@last_fd[tid]] = ntop(AF_INET, $s->sin_addr.s_addr);
+    @fd_port[@last_fd[tid]] = ($s->sin_port >> 8) | (($s->sin_port << 8) & 0xff00);
+  } else {
+    $s6 = (struct sockaddr_in6 *)@sockaddr[tid];
+    @fd_address[@last_fd[tid]] = ntop(AF_INET6, $s6->sin6_addr.in6_u.u6_addr8);
+    @fd_port[@last_fd[tid]] = ($s6->sin6_port >> 8) | (($s6->sin6_port << 8) & 0xff00);
+  }
+
+  CHANGE_FD(@last_fd[tid]);
+
+  delete(@sockaddr[tid]);
+  delete(@last_fd[tid]);
+}
+
+tracepoint:syscalls:sys_enter_accept,
+tracepoint:syscalls:sys_enter_accept4
+/MAIN_FILTER/
+{
+  @last_fd[tid] = args->fd;
+}
+
+tracepoint:syscalls:sys_exit_accept,
+tracepoint:syscalls:sys_exit_accept4
+/MAIN_FILTER && args->ret >= 0/
+{
+  CHANGE_FD(@last_fd[tid]);
+
+  @fd_type[args->ret] = 2;
+  @fd_name[args->ret] = "accept";
+  @fd_address[args->ret] = @fd_address[@last_fd[tid]];
+  @fd_port[args->ret] = @fd_port[@last_fd[tid]];
+  CREATE_FD(args->ret);
+
+  delete(@last_fd[tid]);
+}

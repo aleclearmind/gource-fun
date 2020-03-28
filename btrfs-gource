@@ -1,0 +1,32 @@
+#!/bin/bash
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo "Usage: $0 [BTRFS_PATH] [GENERATION]" > /dev/stderr
+    exit 1
+fi
+
+BTRFS_PATH="$1"
+GENERATION="$2"
+
+if [[ -z $BTRFS_PATH ]]; then
+    BTRFS_PATH="/"
+fi
+
+BTRFS_PATH_TYPE="$(df -T / | tail -n1 | awk '{ print $2 }')"
+if [[ $BTRFS_PATH_TYPE != btrfs ]]; then
+    echo "The path $BTRFS_PATH is not btrfs but $BTRFS_PATH_TYPE" > /dev/stderr
+    exit 1
+fi
+
+if [[ -z $GENERATION ]]; then
+    GENERATION="$(sudo btrfs subvolume find-new / 10000000000 | awk '{ print $4 }')"
+    echo "Using last generation: $GENERATION" > /dev/stderr
+fi
+
+sudo \
+    btrfs \
+    subvolume \
+    find-new \
+    "$BTRFS_PATH" \
+    "$GENERATION" \
+    | grep inode | awk '{ print $14 "|btrfs|M|" $17 }'

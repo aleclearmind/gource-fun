@@ -1,0 +1,14 @@
+#!/bin/bash
+
+sudo true
+
+TMP=$(mktemp)
+
+echo "$@ 1>&2" > "$TMP"
+
+cat trace-fds.bt \
+  | ./preprocess \
+  | systemd-run --user --scope \
+    sudo \
+    sh -c "bpftrace -c 'sudo -u $USER sh $TMP' /dev/stdin" \
+  | grep -v '^\s*$' | grep '|' | grep -v '|/r$'

@@ -1,0 +1,42 @@
+#!/bin/bash
+
+OUTPUT="$1"
+
+if [[ "$1" == "-h" || "$1" == "--help" || -z "$OUTPUT" ]]; then
+    echo "Usage: $0 OUTPUT" > /dev/stderr
+    exit 1
+fi
+shift
+
+TMP="$(mktemp)"
+
+cat > "$TMP"
+
+gource \
+    "$TMP" \
+    --hide dirnames,filenames,date,mouse,progress \
+    --log-format custom \
+    --padding 1 \
+    --multi-sampling \
+    --output-ppm-stream - \
+    --output-framerate 30 \
+    --stop-at-end \
+    --bloom-multiplier 1 \
+    --bloom-intensity 1 \
+    -1280x720 \
+    -s $((60 * 60 * 24)) \
+| ffmpeg \
+    -y \
+    -r 60 \
+    -f image2pipe \
+    -vcodec ppm \
+    -i - \
+    -vcodec libx264 \
+    -preset medium \
+    -pix_fmt yuv420p \
+    -crf 1 \
+    -threads 0 \
+    -bf 0 \
+    "$OUTPUT"
+
+rm "$TMP"
